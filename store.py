@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -174,6 +175,74 @@ def _make_derivatives(image: Image.Image, identity: str, work: Path) -> tuple[di
     }, sizes["thumb"]
 
 
+def _new_row(image, identity, work, filename, name, other_name, category, angle, tags) -> dict:
+    """Build one index row and its derivative files inside ``work``.
+
+    Does not touch the index or the final asset paths; the caller commits both.
+    """
+    meta, thumb_size = _make_derivatives(image, identity, work)
+    return {
+        "id": identity,
+        "name": name,
+        "other_name": other_name or name,
+        "category": category,
+        "angle": angle,
+        "tags": [t.strip() for t in re.split(r"[,，\s]+", tags) if t.strip()],
+        "w": meta["w"],
+        "h": meta["h"],
+        "thumb_w": thumb_size[0],
+        "thumb_h": thumb_size[1],
+        "bytes": meta["bytes"],
+        "sha256": meta["sha256"],
+        "original_filename": filename,
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        "full": meta["full"],
+        "preview": meta["preview"],
+        "thumb": meta["thumb"],
+    }
+
+
+def _commit_index(rows: list[dict]) -> None:
+    """Atomically replace the whole index with ``rows`` (one write, one fsync)."""
+    index = _index_file()
+    temp_index = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=index.parent,
+            prefix=".index-", suffix=".tmp", delete=False,
+        ) as fh:
+            temp_index = Path(fh.name)
+            json.dump(rows, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temp_index, index)
+    except OSError as exc:
+        raise GalleryError("storage_error", 500) from exc
+    finally:
+        if temp_index and temp_index.exists():
+            temp_index.unlink(missing_ok=True)
+
+
+def _destinations(identity: str) -> dict[str, Path]:
+    return {k: _safe(LIBRARY, f"{DIRS[k]}/{identity}{EXT[k]}") for k in DIRS}
+
+
+def _move_derivatives(work: Path, destinations: dict[str, Path]) -> list[Path]:
+    """Move staged files into place, rolling back this image on any failure."""
+    moved: list[Path] = []
+    try:
+        for kind, target in destinations.items():
+            src = work / ("full.png" if kind == "full" else f"{kind}.webp")
+            os.replace(src, target)
+            moved.append(target)
+    except OSError:
+        for target in moved:
+            target.unlink(missing_ok=True)
+        raise GalleryError("storage_error", 500)
+    return moved
+
+
 def import_image(
     data: bytes,
     *,
@@ -196,60 +265,26 @@ def import_image(
     identity = "g-" + uuid.uuid4().hex
     with _LOCK:
         LIBRARY.mkdir(parents=True, exist_ok=True)
-        index = _index_file()
-        destinations = {
-            k: _safe(LIBRARY, f"{DIRS[k]}/{identity}{EXT[k]}") for k in DIRS
-        }
+        destinations = _destinations(identity)
         for target in destinations.values():
             target.parent.mkdir(parents=True, exist_ok=True)
         if any(p.exists() for p in destinations.values()):
             raise GalleryError("storage_error", 500)
 
-        import tempfile
-
         moved: list[Path] = []
-        temp_index = None
         committed = False
         try:
             with tempfile.TemporaryDirectory(prefix=".import-", dir=LIBRARY) as tmp:
                 work = Path(tmp)
-                meta, thumb_size = _make_derivatives(image, identity, work)
-                row = {
-                    "id": identity,
-                    "name": name,
-                    "other_name": other_name or name,
-                    "category": category,
-                    "angle": angle,
-                    "tags": [t.strip() for t in re.split(r"[,，\s]+", tags) if t.strip()],
-                    "w": meta["w"],
-                    "h": meta["h"],
-                    "thumb_w": thumb_size[0],
-                    "thumb_h": thumb_size[1],
-                    "bytes": meta["bytes"],
-                    "sha256": meta["sha256"],
-                    "original_filename": filename,
-                    "uploaded_at": datetime.now(timezone.utc).isoformat(),
-                    "full": meta["full"],
-                    "preview": meta["preview"],
-                    "thumb": meta["thumb"],
-                }
-                for kind, target in destinations.items():
-                    src = work / ("full.png" if kind == "full" else f"{kind}.webp")
-                    os.replace(src, target)
-                    moved.append(target)
+                row = _new_row(
+                    image, identity, work, filename, name, other_name,
+                    category, angle, tags,
+                )
+                moved = _move_derivatives(work, destinations)
                 existing = read_records()
                 if any(r.get("id") == identity for r in existing):
                     raise GalleryError("storage_error", 500)
-                with tempfile.NamedTemporaryFile(
-                    "w", encoding="utf-8", dir=index.parent,
-                    prefix=".index-", suffix=".tmp", delete=False,
-                ) as fh:
-                    temp_index = Path(fh.name)
-                    json.dump(existing + [row], fh, ensure_ascii=False, indent=2)
-                    fh.write("\n")
-                    fh.flush()
-                    os.fsync(fh.fileno())
-                os.replace(temp_index, index)
+                _commit_index(existing + [row])
                 committed = True
             return row
         except GalleryError:
@@ -260,40 +295,25 @@ def import_image(
             if not committed:
                 for target in moved:
                     target.unlink(missing_ok=True)
-                if temp_index:
-                    temp_index.unlink(missing_ok=True)
 
 
 def delete_record(identity: str) -> dict:
     row = get_record(identity)
     with _LOCK:
         remaining = [r for r in read_records() if r.get("id") != identity]
-        index = _index_file()
-        import tempfile
-        temp_index = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                "w", encoding="utf-8", dir=index.parent,
-                prefix=".index-", suffix=".tmp", delete=False,
-            ) as fh:
-                temp_index = Path(fh.name)
-                json.dump(remaining, fh, ensure_ascii=False, indent=2)
-                fh.write("\n")
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(temp_index, index)
-        except OSError as exc:
-            raise GalleryError("storage_error", 500) from exc
-        finally:
-            if temp_index and temp_index.exists():
-                temp_index.unlink(missing_ok=True)
+        _commit_index(remaining)
         for kind in DIRS:
             _safe(LIBRARY, row[kind]).unlink(missing_ok=True)
         return {"deleted": identity}
 
 
 def import_folder(folder: str, *, category: str = "", limit: int = 2000) -> dict:
-    """Import every static image in a user-specified folder (non-recursive)."""
+    """Import every static image in a user-specified folder (non-recursive).
+
+    Derivatives are staged one image at a time, but the index is written only
+    once at the end. Rewriting and fsync-ing the full index on every single
+    image made large folders progressively slower (O(n^2)).
+    """
     source = Path(folder).expanduser()
     if not source.is_dir():
         raise GalleryError("folder_not_found")
@@ -301,16 +321,40 @@ def import_folder(folder: str, *, category: str = "", limit: int = 2000) -> dict
         p for p in source.iterdir()
         if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
     )[:limit]
+
     ok, failed = 0, []
-    for path in files:
+    new_rows: list[dict] = []
+    stored: list[Path] = []
+
+    with _LOCK:
+        LIBRARY.mkdir(parents=True, exist_ok=True)
+        existing = read_records()
         try:
-            import_image(
-                path.read_bytes(),
-                filename=path.name,
-                name=path.stem,
-                category=category,
-            )
-            ok += 1
-        except GalleryError as exc:
-            failed.append({"file": path.name, "error": exc.code})
+            for path in files:
+                try:
+                    image = _decode(path.read_bytes(), path.name)
+                    name = _text(path.stem, required=True)
+                    cat = _text(category) or "未分类"
+                    identity = "g-" + uuid.uuid4().hex
+                    destinations = _destinations(identity)
+                    if any(p.exists() for p in destinations.values()):
+                        raise GalleryError("storage_error", 500)
+                    with tempfile.TemporaryDirectory(prefix=".import-", dir=LIBRARY) as tmp:
+                        row = _new_row(
+                            image, identity, Path(tmp), path.name, name, name,
+                            cat, "unknown", "",
+                        )
+                        stored.extend(_move_derivatives(Path(tmp), destinations))
+                    new_rows.append(row)
+                    ok += 1
+                except GalleryError as exc:
+                    failed.append({"file": path.name, "error": exc.code})
+                except (OSError, ValueError):
+                    failed.append({"file": path.name, "error": "storage_error"})
+            if new_rows:
+                _commit_index(existing + new_rows)
+        except Exception:
+            for target in stored:
+                target.unlink(missing_ok=True)
+            raise
     return {"imported": ok, "failed": failed, "total": len(files)}
