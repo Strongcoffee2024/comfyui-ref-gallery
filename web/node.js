@@ -5,6 +5,16 @@ function previewURL(id) {
   return api.apiURL(`/ref_gallery/assets/preview/${encodeURIComponent(id)}.webp`);
 }
 
+function localPreviewURL(path) {
+  return api.apiURL(`/ref_gallery/local_thumb?path=${encodeURIComponent(path)}`);
+}
+
+function parentFolder(path) {
+  const p = String(path || "");
+  const i = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
+  return i > 0 ? p.slice(0, i) : p;
+}
+
 function wireGalleryNode(nodeType, nodeData) {
   const created = nodeType.prototype.onNodeCreated;
   nodeType.prototype.onNodeCreated = function () {
@@ -12,9 +22,10 @@ function wireGalleryNode(nodeType, nodeData) {
     const node = this;
     const isRandom = nodeData.name === "RandomRefGallery";
     const idWidget = node.widgets.find((w) => w.name === "image_id");
-    if (!idWidget) return;
+    const localWidget = node.widgets.find((w) => w.name === "local_path");
+    if (!idWidget || !localWidget) return;
 
-    let dialog = null, frame = null;
+    let dialog = null, frame = null, mode = null;
 
     const previewBox = document.createElement("div");
     previewBox.style.cssText = "position:relative;width:100%;height:100%;min-height:280px;max-height:460px;contain:size;box-sizing:border-box;background:#f4f3ef;border-radius:8px;overflow:hidden;";
@@ -28,16 +39,24 @@ function wireGalleryNode(nodeType, nodeData) {
     let request = 0;
     function updatePreview() {
       const token = ++request;
+      const local = String(localWidget.value || "").trim();
       const id = String(idWidget.value || "");
       previewMsg.style.display = "none"; preview.style.display = "block";
-      if (!id) { preview.removeAttribute("src"); previewMsg.textContent = "尚未选图，点击下方按钮浏览图库。"; previewMsg.style.display = "grid"; preview.style.display = "none"; return; }
+      if (!local && !id) {
+        preview.removeAttribute("src");
+        previewMsg.textContent = "尚未选图。点下方按钮浏览图库，或加载本机任意位置的图片。";
+        previewMsg.style.display = "grid"; preview.style.display = "none";
+        return;
+      }
       preview.onload = () => { if (token === request) { preview.style.display = "block"; previewMsg.style.display = "none"; } };
-      preview.onerror = () => { if (token === request) { preview.style.display = "none"; previewMsg.textContent = "预览加载失败，可能图片已被删除。"; previewMsg.style.display = "grid"; } };
-      preview.src = previewURL(id);
+      preview.onerror = () => { if (token === request) { preview.style.display = "none"; previewMsg.textContent = "预览加载失败，图片可能已被移动或删除。"; previewMsg.style.display = "grid"; } };
+      preview.src = local ? localPreviewURL(local) : previewURL(id);
     }
 
-    const onChange = idWidget.callback;
-    idWidget.callback = function () { onChange?.apply(this, arguments); updatePreview(); };
+    for (const widget of [idWidget, localWidget]) {
+      const cb = widget.callback;
+      widget.callback = function () { cb?.apply(this, arguments); updatePreview(); };
+    }
 
     function receive(e) {
       if (e.origin !== location.origin || e.source !== frame?.contentWindow) return;
@@ -45,11 +64,16 @@ function wireGalleryNode(nodeType, nodeData) {
       if (data.type === "ref-gallery-ready") {
         frame.contentWindow.postMessage({ type: "ref-gallery-current", id: String(idWidget.value || "") }, location.origin);
       }
+      if (data.type === "ref-local-ready") {
+        frame.contentWindow.postMessage({ type: "ref-local-current", path: parentFolder(localWidget.value) }, location.origin);
+      }
       if (data.type === "ref-gallery-changed") { updatePreview(); }
       if (data.type === "ref-gallery-close") { close(); return; }
       if (data.type === "ref-gallery-select" && typeof data.id === "string") {
         idWidget.value = data.id;
+        localWidget.value = "";
         idWidget.callback?.(idWidget.value);
+        localWidget.callback?.(localWidget.value);
         if (isRandom) {
           const lock = node.widgets.find((w) => w.name === "locked");
           if (lock) { lock.value = true; lock.callback?.(true); }
@@ -58,47 +82,69 @@ function wireGalleryNode(nodeType, nodeData) {
         app.graph.change();
         close();
       }
-    }
-    function close() {
-      window.removeEventListener("message", receive);
-      dialog?.remove(); dialog = null; frame = null;
+      if (data.type === "ref-local-select" && typeof data.path === "string") {
+        localWidget.value = data.path;
+        idWidget.value = "";
+        localWidget.callback?.(localWidget.value);
+        idWidget.callback?.(idWidget.value);
+        node.setDirtyCanvas(true, true);
+        app.graph.change();
+        close();
+      }
     }
 
-    const browse = document.createElement("button");
-    browse.type = "button";
-    browse.textContent = "浏览参考图库 · 上传 / 搜索 / 选图";
-    browse.style.cssText = "width:100%;height:36px;border:1px solid #b9c9bf;border-radius:6px;background:#e9f0eb;color:#244133;cursor:pointer;font:12px sans-serif;";
-    browse.onclick = () => {
+    function close() {
+      window.removeEventListener("message", receive);
+      dialog?.remove(); dialog = null; frame = null; mode = null;
+    }
+
+    function openBrowser(kind, titleText, url) {
       if (dialog) return;
+      mode = kind;
       dialog = document.createElement("dialog");
       dialog.style.cssText = "width:96vw;height:94vh;max-width:1800px;padding:0;border:1px solid #777;border-radius:12px;background:#f7f7f5;";
       const header = document.createElement("div");
       header.style.cssText = "height:44px;display:flex;align-items:center;justify-content:space-between;padding:0 18px;background:#e9f0eb;color:#244133;font:14px sans-serif;";
       const title = document.createElement("strong");
-      title.textContent = "参考图库 · 选一张图片后点「使用选中图片」";
+      title.textContent = titleText;
       const x = document.createElement("button");
       x.textContent = "关闭"; x.style.cssText = "cursor:pointer;padding:5px 14px;border-radius:6px;border:1px solid #b9c9bf;background:#fff;";
       x.onclick = close; header.append(title, x);
       frame = document.createElement("iframe");
-      frame.src = api.apiURL("/ref_gallery/gallery");
-      frame.title = "参考图库";
+      frame.src = api.apiURL(url);
+      frame.title = titleText;
       frame.style.cssText = "width:100%;height:calc(100% - 44px);border:0;";
       dialog.append(header, frame);
       window.addEventListener("message", receive);
       dialog.addEventListener("cancel", (ev) => { ev.preventDefault(); close(); });
       dialog.addEventListener("click", (ev) => { if (ev.target === dialog) close(); });
       document.body.append(dialog); dialog.showModal();
-    };
+    }
+
+    const browseGallery = document.createElement("button");
+    browseGallery.type = "button";
+    browseGallery.textContent = "浏览参考图库 · 上传 / 搜索 / 选图";
+    browseGallery.style.cssText = "width:100%;height:36px;border:1px solid #b9c9bf;border-radius:6px;background:#e9f0eb;color:#244133;cursor:pointer;font:12px sans-serif;";
+    browseGallery.onclick = () => openBrowser(
+      "gallery", "参考图库 · 选一张图片后点「使用选中图片」", "/ref_gallery/gallery");
+
+    const browseLocal = document.createElement("button");
+    browseLocal.type = "button";
+    browseLocal.textContent = "加载本地图片 · 任意文件夹（不复制入库）";
+    browseLocal.style.cssText = "width:100%;height:36px;border:1px solid #b9c9bf;border-radius:6px;background:#fff;color:#244133;cursor:pointer;font:12px sans-serif;";
+    browseLocal.onclick = () => openBrowser(
+      "local", "加载本地图片 · 列出文件夹后选图", "/ref_gallery/local_browser");
 
     const toolbar = document.createElement("div");
     toolbar.style.cssText = "width:100%;display:flex;gap:6px;flex-direction:column;";
-    toolbar.append(browse);
+    toolbar.append(browseGallery, browseLocal);
     if (isRandom) {
       const dice = document.createElement("button");
       dice.type = "button";
       dice.textContent = "🎲 随机抽一张（不运行工作流）";
       dice.style.cssText = "width:100%;height:34px;border:1px solid #b9c9bf;border-radius:6px;background:#fff;color:#244133;cursor:pointer;font:12px sans-serif;";
       dice.onclick = async () => {
+        if (String(localWidget.value || "").trim()) { dice.textContent = "已选本地图片，请先清空"; setTimeout(() => dice.textContent = "🎲 随机抽一张（不运行工作流）", 1500); return; }
         const lock = node.widgets.find((w) => w.name === "locked");
         if (lock?.value) { dice.textContent = "已锁定，请先解锁"; setTimeout(() => dice.textContent = "🎲 随机抽一张（不运行工作流）", 1500); return; }
         const cat = node.widgets.find((w) => w.name === "category");
@@ -117,7 +163,7 @@ function wireGalleryNode(nodeType, nodeData) {
     }
 
     node.addDOMWidget("refgallery_control", "refgallery_control", toolbar,
-      { serialize: false, hideOnZoom: false, getMinHeight: () => isRandom ? 82 : 42, getMaxHeight: () => isRandom ? 82 : 42 });
+      { serialize: false, hideOnZoom: false, getMinHeight: () => isRandom ? 116 : 78, getMaxHeight: () => isRandom ? 116 : 78 });
     node.addDOMWidget("refgallery_preview", "refgallery_preview", previewBox,
       { serialize: false, hideOnZoom: false, getMinHeight: () => 280, getMaxHeight: () => 460 });
 
@@ -126,7 +172,7 @@ function wireGalleryNode(nodeType, nodeData) {
     const removed = node.onRemoved;
     node.onRemoved = function () { close(); removed?.apply(this, arguments); };
 
-    node.setSize([380, isRandom ? 520 : 480]);
+    node.setSize([380, isRandom ? 540 : 500]);
     updatePreview();
   };
 }

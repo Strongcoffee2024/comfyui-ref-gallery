@@ -16,7 +16,7 @@ from aiohttp import web
 from PIL import Image, ImageOps
 from server import PromptServer
 
-from . import store
+from . import store, local_images
 
 MAX_BYTES = store.MAX_BYTES
 
@@ -43,16 +43,29 @@ class RefGallery:
                     "tooltip": "点击「浏览参考图库」选图；也可直接填入图片 ID。",
                 }),
             },
+            "optional": {
+                "local_path": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                    "tooltip": "点击「加载本地图片」选择本机任意位置的图片；不复制入库。有值时优先于 image_id。",
+                }),
+            },
         }
 
     RETURN_TYPES = ("IMAGE", "INT", "INT", "STRING", "STRING", "STRING")
     RETURN_NAMES = ("image", "width", "height", "image_id", "name", "description")
     FUNCTION = "load_image"
     CATEGORY = "image/Ref Gallery"
-    DESCRIPTION = "个人参考图库：上传/导入自己的图片，浏览选图并输出 IMAGE。"
+    DESCRIPTION = "个人参考图库：从图库选图，或加载本机任意位置的图片，输出 IMAGE。"
 
     @classmethod
-    def VALIDATE_INPUTS(cls, image_id=""):
+    def VALIDATE_INPUTS(cls, image_id="", local_path=""):
+        if local_path and local_path.strip():
+            try:
+                local_images.resolve(local_path)
+            except store.GalleryError as exc:
+                return str(exc.code)
+            return True
         try:
             store.asset_path("full", store.get_record(image_id)["full"].split("/")[-1])
         except store.GalleryError as exc:
@@ -60,7 +73,13 @@ class RefGallery:
         return True
 
     @classmethod
-    def IS_CHANGED(cls, image_id=""):
+    def IS_CHANGED(cls, image_id="", local_path=""):
+        if local_path and local_path.strip():
+            try:
+                path = local_images.resolve(local_path)
+                return f"local:{path}:{path.stat().st_mtime_ns}"
+            except (store.GalleryError, OSError):
+                return f"local:{local_path}"
         try:
             record = store.get_record(image_id)
             path = store.asset_path("full", record["full"].split("/")[-1])
@@ -68,7 +87,12 @@ class RefGallery:
         except (store.GalleryError, OSError):
             return image_id
 
-    def load_image(self, image_id=""):
+    def load_image(self, image_id="", local_path=""):
+        if local_path and local_path.strip():
+            path = local_images.resolve(local_path)
+            tensor, width, height = _tensor_from(path)
+            return (tensor, width, height, "", path.stem,
+                    f"本地文件 · {path.parent.name} · {path.suffix.lower()}")
         record = store.get_record(image_id)
         path = store.asset_path("full", record["full"].split("/")[-1])
         tensor, width, height = _tensor_from(path)
@@ -96,6 +120,8 @@ class RandomRefGallery(RefGallery):
             "optional": {
                 "image_id": ("STRING", {"default": "", "multiline": False,
                     "tooltip": "骰子当前选中的 ID；锁定后固定使用它。"}),
+                "local_path": ("STRING", {"default": "", "multiline": False,
+                    "tooltip": "点击「加载本地图片」选择本机任意位置的图片；有值时优先于随机抽取。"}),
                 "locked": ("BOOLEAN", {"default": False, "tooltip": "锁定当前图片，运行时不再随机。"}),
             },
         }
@@ -119,7 +145,9 @@ class RandomRefGallery(RefGallery):
         return rows
 
     @classmethod
-    def VALIDATE_INPUTS(cls, category="all", image_id="", locked=False):
+    def VALIDATE_INPUTS(cls, category="all", image_id="", local_path="", locked=False):
+        if local_path and local_path.strip():
+            return super().VALIDATE_INPUTS("", local_path)
         try:
             if locked:
                 return super().VALIDATE_INPUTS(image_id)
@@ -129,17 +157,26 @@ class RandomRefGallery(RefGallery):
         return True
 
     @classmethod
-    def IS_CHANGED(cls, category="all", image_id="", locked=False):
+    def IS_CHANGED(cls, category="all", image_id="", local_path="", locked=False):
+        if local_path and local_path.strip():
+            return super().IS_CHANGED("", local_path)
         if locked:
             return super().IS_CHANGED(image_id)
         return str(random.getrandbits(64))
 
-    def load_random(self, category="all", image_id="", locked=False):
+    def load_random(self, category="all", image_id="", local_path="", locked=False):
+        if local_path and local_path.strip():
+            result = super().load_image("", local_path)
+            return {
+                "ui": {"picked_id": [""], "picked_name": [result[4]]},
+                "result": result,
+            }
         if locked:
             selected = store.get_record(image_id)
+            result = super().load_image(selected["id"])
         else:
             selected = random.choice(self._candidates(category))
-        result = super().load_image(selected["id"])
+            result = super().load_image(selected["id"])
         return {
             "ui": {"picked_id": [selected["id"]], "picked_name": [selected["name"]]},
             "result": result,
@@ -196,6 +233,32 @@ async def random_route(request):
                                  headers={"Cache-Control": "no-store"})
     except store.GalleryError as exc:
         return _json_error(exc)
+
+
+@routes.get("/ref_gallery/local_browser")
+async def local_browser_route(request):
+    return web.FileResponse(Path(__file__).parent / "web" / "local.html",
+                            headers={"Cache-Control": "no-cache"})
+
+
+@routes.get("/ref_gallery/local_list")
+async def local_list_route(request):
+    try:
+        folder = request.query.get("folder", "")
+        recursive = request.query.get("recursive", "0") == "1"
+        result = await asyncio.to_thread(local_images.list_folder, folder, recursive=recursive)
+        return web.json_response(result, headers={"Cache-Control": "no-store"})
+    except store.GalleryError as exc:
+        return _json_error(exc)
+
+
+@routes.get("/ref_gallery/local_thumb")
+async def local_thumb_route(request):
+    try:
+        path = await asyncio.to_thread(local_images.thumb_path, request.query.get("path", ""))
+        return web.FileResponse(path, headers={"Cache-Control": "private, max-age=3600"})
+    except store.GalleryError:
+        raise web.HTTPNotFound()
 
 
 @routes.post("/ref_gallery/upload")

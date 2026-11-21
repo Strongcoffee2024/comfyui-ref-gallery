@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>加载本地图片 · Local Image</title>
+<link rel="stylesheet" href="/extensions/comfyui-ref-gallery/gallery.css">
+<style>
+.pathbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 18px;background:#fff;border-bottom:1px solid var(--line)}
+.pathbar input[type=text]{flex:1;min-width:320px}
+.pathbar label.chk{display:inline-flex;align-items:center;gap:5px;margin:0;white-space:nowrap;color:var(--muted)}
+.pathbar label.chk input{width:auto;margin:0}
+.card .sub.dim{color:#8a877f}
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">加载本地图片 <span>Local Image · 直接引用，不复制入库</span></div>
+  <div class="tools">
+    <input id="search" type="search" placeholder="搜索文件名 / 相对路径" aria-label="搜索">
+    <button id="btn-select" type="button" class="primary" disabled>使用选中图片</button>
+    <button id="btn-close" type="button">关闭</button>
+  </div>
+</header>
+<div class="pathbar">
+  <input id="folder" type="text" placeholder="输入 ComfyUI 所在机器上的文件夹绝对路径，例如 D:\refs\poses" aria-label="文件夹路径">
+  <label class="chk"><input id="recursive" type="checkbox"> 含子目录</label>
+  <button id="btn-list" type="button" class="primary">列出图片</button>
+</div>
+<main>
+  <p id="status" class="status">输入文件夹路径后点「列出图片」。图片不会被复制，删除或移动原文件会影响节点出图。</p>
+  <div id="grid" class="grid"></div>
+</main>
+<script type="module" src="/extensions/comfyui-ref-gallery/local.js"></script>
+</body>
+</html>
