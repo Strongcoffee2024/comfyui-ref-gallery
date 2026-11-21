@@ -7,6 +7,8 @@ fast. Files stay where they are; deleting them from disk removes them everywhere
 from __future__ import annotations
 
 import hashlib
+import io
+import uuid
 from pathlib import Path
 
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -18,6 +20,8 @@ GalleryError = store.GalleryError
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 THUMB_LIMIT = (400, 500)
 LIST_LIMIT = 5000
+PICK_MAX_BYTES = 100 * 1024 * 1024
+PICKED_DIR_NAME = "picked"
 
 
 def resolve(path: str) -> Path:
@@ -63,6 +67,45 @@ def thumb_path(path: str) -> Path:
         except (UnidentifiedImageError, OSError, ValueError) as exc:
             raise GalleryError("invalid_image") from exc
     return out
+
+
+def save_picked_image(data: bytes, filename: str) -> dict:
+    """Persist a file chosen in the browser's native picker to a cache folder.
+
+    This mirrors ComfyUI's built-in Load Image: the browser cannot expose the
+    absolute path of a picked file, so the bytes are uploaded and stored here.
+    Files go into ``<library>/picked`` and are NOT added to the gallery index.
+    """
+    if not data:
+        raise GalleryError("image_required")
+    if len(data) > PICK_MAX_BYTES:
+        raise GalleryError("file_too_large", 413)
+
+    # Judge by real content, not the filename extension, like the main library.
+    real_formats = {"PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp"}
+    suffix = None
+    try:
+        with Image.open(io.BytesIO(data)) as probe:
+            if probe.format not in real_formats:
+                raise GalleryError("unsupported_format")
+            if getattr(probe, "n_frames", 1) != 1:
+                raise GalleryError("animated_image")
+            suffix = real_formats[probe.format]
+            probe.verify()
+    except GalleryError:
+        raise
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise GalleryError("invalid_image") from exc
+
+    cache = store.LIBRARY / PICKED_DIR_NAME
+    cache.mkdir(parents=True, exist_ok=True)
+    target = cache / f"pick-{uuid.uuid4().hex}{suffix}"
+    target.write_bytes(data)
+    return {
+        "path": str(target),
+        "name": Path(filename).name if filename else target.name,
+        "size": len(data),
+    }
 
 
 def list_folder(folder: str, *, recursive: bool = False) -> dict:

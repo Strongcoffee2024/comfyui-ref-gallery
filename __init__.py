@@ -261,6 +261,35 @@ async def local_thumb_route(request):
         raise web.HTTPNotFound()
 
 
+@routes.post("/ref_gallery/pick")
+async def pick_route(request):
+    """Receive one file chosen via the browser's native file picker."""
+    try:
+        multipart = await request.multipart()
+        data, filename = None, None
+        async for part in multipart:
+            if part.filename is None:
+                continue
+            if data is not None:
+                raise store.GalleryError("single_image_only")
+            chunks, size = [], 0
+            while chunk := await part.read_chunk():
+                size += len(chunk)
+                if size > local_images.PICK_MAX_BYTES:
+                    raise store.GalleryError("file_too_large", 413)
+                chunks.append(chunk)
+            data, filename = b"".join(chunks), part.filename
+        if data is None:
+            raise store.GalleryError("image_required")
+        row = await asyncio.to_thread(local_images.save_picked_image, data, filename)
+        return web.json_response(row, status=201, headers={"Cache-Control": "no-store"})
+    except store.GalleryError as exc:
+        return _json_error(exc)
+    except OSError:
+        logging.exception("ref_gallery pick failed")
+        return web.json_response({"error": "storage_error"}, status=500)
+
+
 @routes.post("/ref_gallery/upload")
 async def upload_route(request):
     try:

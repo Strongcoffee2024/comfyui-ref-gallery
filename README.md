@@ -7,7 +7,7 @@ ComfyUI 自定义节点：**两种取图方式——从持久化图库选图，�
 ## 功能
 
 - **浏览参考图库**：点节点上的「浏览参考图库」按钮，可上传、从文件夹批量导入、搜索、筛选、选图。图片会复制到图库存盘，永久可用。
-- **加载本地图片**：点节点上的「加载本地图片」按钮，输入任意文件夹路径即可列出其中图片并选图。**图片留在原位置，不复制入库、不占额外空间**；原图被移动或删除后节点会失效。
+- **从电脑选择图片**：点节点上的「从电脑选择图片（像 Load Image）」按钮，直接弹出系统文件选择框——和 ComfyUI 自带的 Load Image 上传按钮完全一样，选完即加载，无需填写路径。可一次选多张，节点底部会显示缩略图条供切换。文件会上传一份到 `user/ref_gallery/picked/`（这是浏览器安全机制决定的，Load Image 本身也是上传到 `input/`），但**不会写入图库索引、不污染图库数量**。
 - 两个按钮互斥：选图库图会清空本地路径，选本地图会清空图库 ID，避免混淆。
 - **上传图片**：单张上传 PNG / JPEG / WebP，≤20 MiB、≤3200 万像素。服务端校验真实内容，拒绝动图、损坏图片和越界文件名。
 - **文件夹批量导入**：指向本机一个文件夹，一次导入其中所有静态图片（可指定统一分类）。索引按批次一次写入，几千张也能快速导入。
@@ -29,9 +29,8 @@ git clone https://github.com/Strongcoffee2024/comfyui-ref-gallery.git comfyui-re
 1. 画布右键 → **image / Ref Gallery** → 添加「参考图库 Ref Gallery」或「随机参考图 Random Ref」。
 2. 两种取图方式，按需选一个：
    - **从图库选**：点「浏览参考图库」→ 上传图片或导入文件夹 → 选中图片 → 「使用选中图片」。图片会复制进图库。
-   - **加载本机图片**：点「加载本地图片」→ 填入文件夹绝对路径（可勾选含子目录）→ 「列出图片」→ 选中 → 「使用选中图片」。**不复制、不入库**，适合已经有整理好的素材目录。
-3. 也可以直接把绝对路径填进节点的 `local_path` 输入框。
-4. 把 `image` 输出接到 Load Image 能接的任何地方（预览、VAE Encode、ControlNet、IPAdapter 等）。
+   - **从电脑选**：点「从电脑选择图片（像 Load Image）」→ 在系统弹出的文件框里选图（可多选）→ 自动上传并加载。多张时点预览下方的缩略图切换。
+3. 把 `image` 输出接到 Load Image 能接的任何地方（预览、VAE Encode、ControlNet、IPAdapter 等）。
 
 随机节点：点「🎲 随机抽一张」即时预览；选中图会自动锁定，运行工作流时固定输出该图；取消锁定则每次运行重新随机。`category` 填 `all` 表示不筛选。若 `local_path` 有值，则直接使用该本地图片，跳过随机。
 
@@ -47,10 +46,11 @@ ComfyUI/user/ref_gallery/
 ├── full/<id>.png        # 原图
 ├── preview/<id>.webp    # 预览
 ├── thumbs/<id>.webp     # 缩略图
-└── local_thumbs/        # 「加载本地图片」的缩略图缓存（可安全删除，会自动重建）
+├── picked/              # 「从电脑选择图片」上传的文件副本（不进索引，不计数）
+└── local_thumbs/        # 本地图片的缩略图缓存（可安全删除，会自动重建）
 ```
 
-「加载本地图片」不写入上述库，只在 `local_thumbs/` 留一份缩略图缓存。备份时备份前三项即可。可用环境变量 `COMFYUI_REF_GALLERY_DIR` 指定其他可写目录（例如容器内共享目录）。同一台 ComfyUI 服务的所有浏览器客户端共享该库，没有账号或多用户隔离。
+「从电脑选择图片」上传的文件只进 `picked/`，**不写入图库索引、不计入图库数量**，因此不影响你已导入的素材。可用环境变量 `COMFYUI_REF_GALLERY_DIR` 指定其他可写目录（例如容器内共享目录）。同一台 ComfyUI 服务的所有浏览器客户端共享该库，没有账号或多用户隔离。
 
 ## 接口
 
@@ -61,9 +61,8 @@ ComfyUI/user/ref_gallery/
 | GET | `/ref_gallery/assets/{kind}/{file}` | 读取 full/preview/thumb |
 | GET | `/ref_gallery/gallery` | 图库页面 |
 | GET | `/ref_gallery/random?category=&exclude_id=` | 随机挑选一张（元数据） |
-| GET | `/ref_gallery/local_browser` | 本地图片浏览页 |
-| GET | `/ref_gallery/local_list?folder=&recursive=` | 列出本机文件夹中的图片 |
 | GET | `/ref_gallery/local_thumb?path=` | 本地图片缩略图（缓存） |
+| POST | `/ref_gallery/pick` | 接收系统文件选择框选中的图片，存入 `picked/` |
 | POST | `/ref_gallery/upload` | multipart 上传，字段 `image`/`name`/`other_name`/`category`/`angle`/`tags` |
 | POST | `/ref_gallery/delete` | JSON `{id}` |
 | POST | `/ref_gallery/import_folder` | JSON `{folder, category}` |
